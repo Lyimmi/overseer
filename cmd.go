@@ -54,6 +54,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -85,6 +87,8 @@ type Cmd struct {
 	changeChan chan CmdState // state changes feed
 	doneChan   chan struct{} // closed when done running
 	buffered   bool          // buffer STDOUT and STDERR to Status.Stdout and Std
+	OsUSer     string        // User's name eg. www-data
+	OsGroup    string        // User's group eg. www-data
 }
 
 // Status represents the running status and consolidated return of a Cmd. It can
@@ -120,6 +124,8 @@ type Options struct {
 	Env        []string
 	DelayStart uint
 	RetryTimes uint
+	OsUSer     string // User's name eg. www-data
+	OsGroup    string // User's group eg. www-data
 
 	// If Buffered is true, STDOUT and STDERR are written to Status.Stdout and
 	// Status.Stderr. The caller can call Cmd.Status to read output at intervals.
@@ -162,6 +168,8 @@ func NewCmd(name string, args ...interface{}) *Cmd {
 		RetryTimes: opts.RetryTimes,
 		Mutex:      &sync.Mutex{},
 		stateLock:  &sync.Mutex{},
+		OsUSer:     opts.OsUSer,
+		OsGroup:    opts.OsGroup,
 		status: Status{
 			Cmd:     name,
 			PID:     0,
@@ -197,6 +205,8 @@ func (c *Cmd) Clone() *Cmd {
 			RetryTimes: c.RetryTimes,
 			Buffered:   c.buffered,
 			Streaming:  c.Stdout != nil,
+			OsUSer:     c.OsUSer,
+			OsGroup:    c.OsGroup,
 		},
 	)
 	return clone
@@ -423,6 +433,29 @@ func (c *Cmd) run() {
 	// process group. This allows Stop to SIGTERM the cmd's process group
 	// without killing this process (i.e. this code here).
 	cmd.SysProcAttr = setSysProcAttr()
+
+	// Set user and group for the process
+	if c.OsUSer != "" && c.OsGroup != "" {
+		sysuser, userErr := user.Lookup(c.OsUSer)
+		if userErr != nil {
+			panic(userErr)
+		}
+		uid, uidErr := strconv.Atoi(sysuser.Uid)
+		if uidErr != nil {
+			panic(uidErr)
+		}
+
+		sysgroup, groupErr := user.LookupGroup(c.OsGroup)
+		if groupErr != nil {
+			panic(groupErr)
+		}
+		gid, gidErr := strconv.Atoi(sysgroup.Gid)
+		if gidErr != nil {
+			panic(gidErr)
+		}
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+
+	}
 
 	// Write stdout and stderr to buffers that are safe to read while writing
 	// and don't cause a race condition.
